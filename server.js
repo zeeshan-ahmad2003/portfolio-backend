@@ -70,7 +70,7 @@ const projects = [
     tech: 'Python · Flask · Streamlit · Tkinter',
     techList: ['Python', 'Flask', 'Streamlit', 'Ghostscript'],
     category: 'Python',
-    githubUrl: 'https://github.com/zeeshan-ahmad2003',
+    githubUrl: 'https://github.com/zeeshan-ahmad2003/pdf-compressor-streamlit',
     liveUrl: 'https://zeeshans-pdf-tool.streamlit.app',
     status: 'Live',
   },
