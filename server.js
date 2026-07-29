@@ -125,21 +125,20 @@ async function connectDB() {
   }
 }
 
-const activeTokens = new Set();
-
 // ── Auth middleware ──────────────────────────────────────────
+// Stateless: validity is determined purely by JWT signature + expiry,
+// not by an in-memory list. This means logged-in users stay logged in
+// across server restarts/redeploys (Render free tier restarts often).
 const auth = (req, res, next) => {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer '))
     return res.status(401).json({ success: false, message: 'No token' });
   const token = header.split(' ')[1];
-  if (!activeTokens.has(token))
-    return res.status(401).json({ success: false, message: 'Token invalid or logged out' });
   try {
     req.user = jwt.verify(token, JWT_SECRET); // { userId, email }
     next();
   } catch {
-    res.status(401).json({ success: false, message: 'Token expired' });
+    res.status(401).json({ success: false, message: 'Token expired or invalid' });
   }
 };
 
@@ -192,7 +191,6 @@ app.post('/api/register', async (req, res) => {
   const result = await db.collection('users').insertOne(newUser);
 
   const token = jwt.sign({ userId: result.insertedId.toString(), email }, JWT_SECRET, { expiresIn: '7d' });
-  activeTokens.add(token);
   res.status(201).json({ success: true, token, data: newUser.profile });
 });
 
@@ -211,14 +209,15 @@ app.post('/api/login', async (req, res) => {
     return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
   const token = jwt.sign({ userId: user._id.toString(), email }, JWT_SECRET, { expiresIn: '7d' });
-  activeTokens.add(token);
   res.json({ success: true, token });
 });
 
 // Logout
+// With stateless JWT auth, "logout" is enforced client-side by deleting
+// the stored token (see ApiService.logout() in the Flutter app). This
+// endpoint is kept for compatibility/logging but doesn't need to track
+// anything server-side.
 app.post('/api/logout', auth, (req, res) => {
-  const token = req.headers.authorization.split(' ')[1];
-  activeTokens.delete(token);
   res.json({ success: true, message: 'Logged out' });
 });
 
