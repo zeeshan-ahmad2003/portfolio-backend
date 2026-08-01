@@ -319,6 +319,86 @@ app.post('/api/projects', auth, async (req, res) => {
   res.status(201).json({ success: true, data: newProject });
 });
 
+// PUT (edit) an existing project (protected)
+app.put('/api/projects/:id', auth, async (req, res) => {
+  const projectId = parseInt(req.params.id);
+  const user = await getUserDoc(req.user.userId);
+  if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+  const projects = user.projects || [];
+  const index = projects.findIndex(p => p.id === projectId);
+  if (index === -1) return res.status(404).json({ success: false, message: 'Project not found' });
+
+  const updated = { ...projects[index], ...req.body, id: projectId };
+  projects[index] = updated;
+
+  await db.collection('users').updateOne(
+    { _id: new ObjectId(req.user.userId) },
+    { $set: { projects } }
+  );
+  res.json({ success: true, data: updated });
+});
+
+// DELETE a project (protected)
+app.delete('/api/projects/:id', auth, async (req, res) => {
+  const projectId = parseInt(req.params.id);
+  const user = await getUserDoc(req.user.userId);
+  if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+  const projects = (user.projects || []).filter(p => p.id !== projectId);
+
+  await db.collection('users').updateOne(
+    { _id: new ObjectId(req.user.userId) },
+    { $set: { projects } }
+  );
+  res.json({ success: true, message: 'Project deleted' });
+});
+
+// PUT change password (protected)
+app.put('/api/change-password', auth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ success: false, message: 'Current and new password required' });
+  }
+  if (newPassword.length < 6) {
+    return res.status(400).json({ success: false, message: 'New password must be at least 6 characters' });
+  }
+
+  const user = await getUserDoc(req.user.userId);
+  if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+  const valid = await bcrypt.compare(currentPassword, user.password);
+  if (!valid) {
+    return res.status(401).json({ success: false, message: 'Current password is incorrect' });
+  }
+
+  const newHash = await bcrypt.hash(newPassword, 10);
+  await db.collection('users').updateOne(
+    { _id: new ObjectId(req.user.userId) },
+    { $set: { password: newHash } }
+  );
+  res.json({ success: true, message: 'Password changed successfully' });
+});
+
+// DELETE own account (protected) — requires password confirmation for safety
+app.delete('/api/account', auth, async (req, res) => {
+  const { password } = req.body;
+  if (!password) {
+    return res.status(400).json({ success: false, message: 'Password required to confirm deletion' });
+  }
+
+  const user = await getUserDoc(req.user.userId);
+  if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+  const valid = await bcrypt.compare(password, user.password);
+  if (!valid) {
+    return res.status(401).json({ success: false, message: 'Incorrect password' });
+  }
+
+  await db.collection('users').deleteOne({ _id: new ObjectId(req.user.userId) });
+  res.json({ success: true, message: 'Account deleted' });
+});
+
 // GET contact (own contact info)
 app.get('/api/contact', auth, async (req, res) => {
   const user = await getUserDoc(req.user.userId);
