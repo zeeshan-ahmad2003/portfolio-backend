@@ -4,8 +4,7 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const cloudinary = require('cloudinary').v2;
 const { MongoClient, ObjectId } = require('mongodb');
 
 const app = express();
@@ -15,16 +14,21 @@ const MONGODB_URI = process.env.MONGODB_URI;
 
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-if (!fs.existsSync('./uploads')) fs.mkdirSync('./uploads');
+
+// ── Cloudinary config (persistent image storage) ─────────────
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 // ── Multer for image upload ──────────────────────────────────
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, './uploads/'),
-  filename: (req, file, cb) =>
-    cb(null, `profile_${Date.now()}${path.extname(file.originalname)}`),
+// Holds the file in memory (not disk) since we immediately stream
+// it to Cloudinary — Render's disk is wiped on every redeploy anyway.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
 });
-const upload = multer({ storage, limits: { fileSize: 5 * 1024 * 1024 } });
 
 // ── MongoDB connection ───────────────────────────────────────
 let db;
@@ -190,8 +194,8 @@ app.post('/api/register', async (req, res) => {
   };
   const result = await db.collection('users').insertOne(newUser);
 
-  const token = jwt.sign({ userId: result.insertedId.toString(), email }, JWT_SECRET, { expiresIn: '7d' });
-  res.status(201).json({ success: true, token, data: newUser.profile });
+  const token = jwt.sign({ userId: result.insertedId.toString(), email }, JWT_SECRET, { expiresIn: '30d' });
+  res.status(201).json({ success: true, token, user: { id: result.insertedId, email, name } });
 });
 
 // Login
@@ -202,26 +206,17 @@ app.post('/api/login', async (req, res) => {
 
   const user = await db.collection('users').findOne({ email });
   if (!user)
-    return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    return res.status(401).json({ success: false, message: 'Invalid email or password' });
 
   const valid = await bcrypt.compare(password, user.password);
   if (!valid)
-    return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    return res.status(401).json({ success: false, message: 'Invalid email or password' });
 
-  const token = jwt.sign({ userId: user._id.toString(), email }, JWT_SECRET, { expiresIn: '7d' });
-  res.json({ success: true, token });
+  const token = jwt.sign({ userId: user._id.toString(), email }, JWT_SECRET, { expiresIn: '30d' });
+  res.json({ success: true, token, user: { id: user._id, email, name: user.profile.name } });
 });
 
-// Logout
-// With stateless JWT auth, "logout" is enforced client-side by deleting
-// the stored token (see ApiService.logout() in the Flutter app). This
-// endpoint is kept for compatibility/logging but doesn't need to track
-// anything server-side.
-app.post('/api/logout', auth, (req, res) => {
-  res.json({ success: true, message: 'Logged out' });
-});
-
-// GET profile (own profile, requires auth since data is now per-user)
+// GET profile (own profile)
 app.get('/api/profile', auth, async (req, res) => {
   const user = await getUserDoc(req.user.userId);
   if (!user) return res.status(404).json({ success: false, message: 'User not found' });
@@ -250,16 +245,37 @@ app.put('/api/profile', auth, async (req, res) => {
   res.json({ success: true, data: user.profile });
 });
 
-// PUT profile image (protected)
+// PUT profile image (protected) — uploads to Cloudinary, not local disk
 app.put('/api/profile/image', auth, upload.single('image'), async (req, res) => {
   if (!req.file)
     return res.status(400).json({ success: false, message: 'No image' });
-  const imageUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
-  await db.collection('users').updateOne(
-    { _id: new ObjectId(req.user.userId) },
-    { $set: { 'profile.profileImage': imageUrl } }
-  );
-  res.json({ success: true, imageUrl });
+
+  try {
+    const uploadResult = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'portfolio_app/profile_images',
+          public_id: `user_${req.user.userId}`, // same id every time = overwrites old photo
+          overwrite: true,
+          resource_type: 'image',
+        },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        }
+      );
+      stream.end(req.file.buffer);
+    });
+
+    await db.collection('users').updateOne(
+      { _id: new ObjectId(req.user.userId) },
+      { $set: { 'profile.profileImage': uploadResult.secure_url } }
+    );
+    res.json({ success: true, imageUrl: uploadResult.secure_url });
+  } catch (err) {
+    console.error('Cloudinary upload failed:', err);
+    res.status(500).json({ success: false, message: 'Image upload failed. Please try again.' });
+  }
 });
 
 // GET skills (own skills)
