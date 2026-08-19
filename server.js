@@ -5,6 +5,8 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
+const sgMail = require('@sendgrid/mail');
+const crypto = require('crypto');
 const { MongoClient, ObjectId } = require('mongodb');
 
 const app = express();
@@ -21,6 +23,9 @@ cloudinary.config({
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
+
+// ── SendGrid config (password reset emails) ───────────────────
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 // ── Multer for image upload ──────────────────────────────────
 // Holds the file in memory (not disk) since we immediately stream
@@ -214,6 +219,80 @@ app.post('/api/login', async (req, res) => {
 
   const token = jwt.sign({ userId: user._id.toString(), email }, JWT_SECRET, { expiresIn: '30d' });
   res.json({ success: true, token, user: { id: user._id, email, name: user.profile.name } });
+});
+
+// Forgot password — sends a 6-digit code to the account's email
+app.post('/api/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ success: false, message: 'Email required' });
+
+  const user = await db.collection('users').findOne({ email });
+
+  // Same response whether or not the account exists, so this endpoint
+  // can't be used to check which emails are registered.
+  const genericResponse = {
+    success: true,
+    message: 'If an account exists for that email, a reset code has been sent.',
+  };
+
+  if (!user) return res.json(genericResponse);
+
+  const code = Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit
+  const hashedCode = crypto.createHash('sha256').update(code).digest('hex');
+  const expires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+
+  await db.collection('users').updateOne(
+    { _id: user._id },
+    { $set: { resetPasswordToken: hashedCode, resetPasswordExpires: expires } }
+  );
+
+  try {
+    await sgMail.send({
+      to: email,
+      from: process.env.SENDGRID_FROM_EMAIL,
+      subject: 'Your password reset code',
+      text: `Your password reset code is ${code}. It expires in 15 minutes. If you didn't request this, you can ignore this email.`,
+      html: `<p>Your password reset code is <strong>${code}</strong>.</p><p>It expires in 15 minutes. If you didn't request this, you can ignore this email.</p>`,
+    });
+  } catch (err) {
+    console.error('SendGrid error:', err.response?.body || err);
+    return res.status(500).json({ success: false, message: 'Could not send reset email. Please try again.' });
+  }
+
+  res.json(genericResponse);
+});
+
+// Reset password — verifies the 6-digit code and sets a new password
+app.post('/api/reset-password', async (req, res) => {
+  const { email, code, newPassword } = req.body;
+  if (!email || !code || !newPassword) {
+    return res.status(400).json({ success: false, message: 'Email, code, and new password required' });
+  }
+  if (newPassword.length < 6) {
+    return res.status(400).json({ success: false, message: 'New password must be at least 6 characters' });
+  }
+
+  const user = await db.collection('users').findOne({ email });
+  if (!user || !user.resetPasswordToken || !user.resetPasswordExpires) {
+    return res.status(400).json({ success: false, message: 'Invalid or expired reset code' });
+  }
+
+  if (new Date() > new Date(user.resetPasswordExpires)) {
+    return res.status(400).json({ success: false, message: 'Reset code has expired. Please request a new one.' });
+  }
+
+  const hashedCode = crypto.createHash('sha256').update(code).digest('hex');
+  if (hashedCode !== user.resetPasswordToken) {
+    return res.status(400).json({ success: false, message: 'Invalid reset code' });
+  }
+
+  const newHash = await bcrypt.hash(newPassword, 10);
+  await db.collection('users').updateOne(
+    { _id: user._id },
+    { $set: { password: newHash }, $unset: { resetPasswordToken: '', resetPasswordExpires: '' } }
+  );
+
+  res.json({ success: true, message: 'Password reset successfully. You can now log in.' });
 });
 
 // GET profile (own profile)
