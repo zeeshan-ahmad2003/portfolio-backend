@@ -434,6 +434,51 @@ app.put('/api/projects/:id', auth, async (req, res) => {
   res.json({ success: true, data: updated });
 });
 
+// PUT project image (protected) — uploads to Cloudinary, stores on that project
+app.put('/api/projects/:id/image', auth, upload.single('image'), async (req, res) => {
+  if (!req.file)
+    return res.status(400).json({ success: false, message: 'No image' });
+
+  const projectId = parseInt(req.params.id);
+
+  try {
+    const uploadResult = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'portfolio_app/project_images',
+          public_id: `user_${req.user.userId}_project_${projectId}`,
+          overwrite: true,
+          resource_type: 'image',
+        },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        }
+      );
+      stream.end(req.file.buffer);
+    });
+
+    const user = await getUserDoc(req.user.userId);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const projects = user.projects || [];
+    const index = projects.findIndex(p => p.id === projectId);
+    if (index === -1) return res.status(404).json({ success: false, message: 'Project not found' });
+
+    projects[index] = { ...projects[index], imageUrl: uploadResult.secure_url };
+
+    await db.collection('users').updateOne(
+      { _id: new ObjectId(req.user.userId) },
+      { $set: { projects } }
+    );
+
+    res.json({ success: true, imageUrl: uploadResult.secure_url, data: projects[index] });
+  } catch (err) {
+    console.error('Cloudinary project image upload failed:', err);
+    res.status(500).json({ success: false, message: 'Image upload failed. Please try again.' });
+  }
+});
+
 // DELETE a project (protected)
 app.delete('/api/projects/:id', auth, async (req, res) => {
   const projectId = parseInt(req.params.id);
